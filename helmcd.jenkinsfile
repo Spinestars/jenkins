@@ -1,0 +1,82 @@
+@Library("devopslib@master") _
+
+def mytools = new org.devops.mytools()
+def gitlab = new org.devops.gitlab()
+
+String branchName = "${env.branchName}"
+String gitHttpURL = "${env.gitHttpURL}"
+String appName = "${JOB_NAME.split('/')[1].split("_")[0]}"
+String buName  = "${appName.split('-')[0]}"
+String releaseVersion = "${env.releaseVersion}"
+
+
+pipeline {
+    agent { label "k8snode"}
+
+    options {
+        skipDefaultCheckout true
+    }
+
+    stages {
+        stage("GetEnvFile"){
+            steps{
+                script{
+                    mytools.GetCode("git",branchName,gitHttpURL)
+                }
+            }
+        }
+
+        stage("Deploy"){
+            steps {
+                script {
+                    sh """
+                        kubectl create ns  ${buName} || echo true
+
+                        helm package "${appName}/"
+                        helm install "${appName}" ./"${appName}"-*.tgz -n ${buName} || helm upgrade "${appName}" ./"${appName}"-*.tgz -n ${buName}
+                        helm history "${appName}"  -n ${buName}
+                    """    
+                    env.revision = sh returnStdout: true, script: """helm history ${appName} -n ${buName} | grep -v 'REVISION' | awk '{print \$1}' """
+                    println("${env.revision}")
+                    println("${env.revision.split('\n').toString()}")
+                    env.REVISION = "${env.revision.split('\n').toString()}"
+                    println("${env.REVISION}")
+
+                    
+
+
+                }
+            }
+                
+        }
+
+        stage('RollBack') {
+            /*input {
+                message "是否回滚上个版本？"
+                ok "Yes"
+                submitter "zeyang,aa"
+                parameters {
+                    choice(choices: REVISION , description: '', name: 'newrevision')
+                }
+            }*/
+            steps {
+
+                script {
+                    def result = input message: 'RollBack?', ok: 'submit', parameters: [choice(choices: "${env.REVISION}", description: '', name: 'revision')]
+
+                    env.result = result - "\n"
+
+                    echo "Actions is  ${env.result}, doing......."
+                    if ( "${env.result}" != ""){
+                        sh """ helm rollback ${appName} ${env.result} -n ${buName}  """
+                    } else {
+                        println("Skip rollback .....")
+                    }
+                }
+                
+            }
+        }
+    }
+}
+
+

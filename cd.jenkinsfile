@@ -1,0 +1,96 @@
+@Library("devopslib@master") _
+
+def mytools = new org.devops.mytools()
+def gitlab = new org.devops.gitlab()
+
+
+String appName = "${JOB_NAME.split('/')[1].split("_")[0]}"
+String releaseVersion = "${env.releaseVersion}"
+String port = "${env.port}"
+String targetDir = "${env.targetDir}"
+String projectType = "${JOB_NAME.split('_')[0].split("-")[-1]}"
+
+//发布主机
+String deployHosts = "${env.deployHosts}"
+
+pipeline {
+    agent { label "build"}
+
+    options {
+        skipDefaultCheckout true
+    }
+
+    stages {
+        stage("PullArtifact"){
+            steps{
+                script{
+                    //下载版本库文件 anyops-devops-service/release-1.1.1.yaml
+                    response = gitlab.GetRepoFile(12,"${appName}%2frelease-${releaseVersion}.yaml", "master")
+                
+                    //读取文件中内容
+                    yamlData = readYaml text: """${response}"""
+                    println(yamlData)
+
+                    artifactUrl = yamlData.artifact
+                    
+
+                    //后端服务
+                    if ( projectType == "service"){
+                        sh " curl -u admin:admin123 ${artifactUrl} -o ${appName}-${releaseVersion}.jar "
+
+                        //下载服务脚本
+                        response = gitlab.GetRepoFile(12,"service.sh", "master")
+                        println(response)
+                        writeFile file: 'service.sh', text: "${response}"
+                        sh "ls -a "
+                    }
+
+                    // 前端服务
+                    if ( projectType == "ui"){
+                        sh " curl -u admin:admin123 ${artifactUrl} -o ${appName}-${releaseVersion}.tar.gz "
+                    }
+                }
+            }
+        }
+
+        stage("DeployHosts"){
+            steps {
+                script {
+                    echo "helloworld"
+                    println("${deployHosts}")
+                    sh "rm -fr hosts"
+                    for ( host in c){
+                        println(host)
+                        sh "echo ${host} >> hosts"
+                    }
+
+                    sh " cat hosts"
+
+                    if ( projectType == "service" ){
+
+                        sh """
+
+                            ansible "${deployHosts}" -m ping -i hosts 
+                            ansible "${deployHosts}" -m shell -a "rm -fr ${targetDir}/${appName}/* &&  mkdir -p ${targetDir}/${appName} || echo file is exists" 
+                            ansible "${deployHosts}" -m copy -a "src=${appName}-${releaseVersion}.jar  dest=${targetDir}/${appName}/${appName}-${releaseVersion}.jar" 
+                            ansible "${deployHosts}" -m copy -a "src=service.sh  dest=${targetDir}/${appName}/service.sh" 
+                            ansible "${deployHosts}" -m shell -a "cd ${targetDir}/${appName}/ ;source /etc/profile  && sh service.sh ${appName} ${releaseVersion} ${port} start" -u root
+                        """
+
+                    }
+
+                    if ( projectType == "ui") {
+                        sh """
+                         ansible "${deployHosts}" -m ping -i hosts 
+                         ansible "${deployHosts}" -m shell -a "rm -fr ${targetDir}/* " 
+                         ansible "${deployHosts}" -m copy -a "src=${appName}-${releaseVersion}.tar.gz  dest=${targetDir}/${appName}-${releaseVersion}.tar.gz"
+                         ansible "${deployHosts}" -m shell -a "cd ${targetDir}/ ; tar zxf ${appName}-${releaseVersion}.tar.gz ; ls" -u root
+                         ansible "${deployHosts}" -m shell -a "nginx -s reload " 
+                        """
+                    }
+                }
+            }
+        }
+
+    }
+}

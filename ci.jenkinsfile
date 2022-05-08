@@ -1,0 +1,148 @@
+@Library("devopslib@master") _
+
+def mytools = new org.devops.mytools()
+def builds  = new org.devops.builds()
+def sonar   = new org.devops.sonarqube()
+def artifacts = new org.devops.artifacts()
+def gitlab = new org.devops.gitlab()
+
+def buildTools = [  "maven" : "/usr/local/apache-maven-3.8.1",
+                    "gradle": "/usr/local/gradle-6.8.3/",
+                    "golang": "/usr/local/go",
+                    "npm"   : "/usr/local/node-v14.16.1-linux-x64/",
+                    "sonar" : "/usr/local/sonar-scanner-4.6.0.2311-linux/"]
+
+//UI上面的参数
+String branchName = "${env.branchName}"
+String gitHttpURL = "${env.gitHttpURL}"
+String buildType  = "${env.buildType}"
+String skipSonar  = "${env.skipSonar}"
+String repoName   = "${JOB_NAME.split('/')[0]}"
+
+
+// 业务名称、应用名称、版本
+String buName = "${JOB_NAME.split('/')[0]}"
+String appName = "${JOB_NAME.split('/')[1].split("_")[0]}"
+String releaseVersion = "${branchName.split('-')[1]}"
+
+
+
+pipeline {
+    agent { label  "build" }    
+    options {
+        skipDefaultCheckout true
+    }
+
+    stages {
+        stage("GetCode"){
+            steps{
+                script{
+                    mytools.GetCode("git",branchName,gitHttpURL)
+                }
+            }
+            
+        }
+
+        stage("Build"){
+            steps {
+                script {
+                    builds.Build(buildTools, buildType)
+                }
+            }
+        }
+
+        stage("SonarScan"){
+            when {
+                environment name: 'skipSonar', value: 'false'
+            }
+            steps{
+                script{
+                    projectName = "${appName}"
+                    sonar.SonarScan(projectName, buildType, buildTools)
+                }
+            }
+        }
+
+        // 上传打好的包到 nexus
+        stage("PushArtifacts"){
+            steps{
+                script{
+
+                    if (buildType == "maven"){
+                        env.fileDir = "target/"
+                        env.fileType = "jar"
+                        env.fileName = sh returnStdout: true, script: "cd ${env.fileDir};ls *.jar"
+                        env.fileName = fileName - "\n"
+                        println(env.fileName)
+                        
+                        println("mv ${env.fileName} ${appName}-${releaseVersion}.${fileType} ")
+                        sh "cd ${env.fileDir}; mv ${env.fileName} ${appName}-${releaseVersion}.${fileType} "
+                        env.fileName = "${appName}-${releaseVersion}.${fileType}"
+                        
+                    } else if (buildType == "npm"){
+                        env.fileDir = "dist/"
+                        env.fileName = "${appName}-${releaseVersion}.tar.gz"
+                        sh "cd ${env.fileDir};tar zcf ${env.fileName} index.html  static/  --warning=no-file-changed"
+                    }
+
+                
+                    env.fileTargetDir = "com/${buName}/${appName}/${releaseVersion}"
+                    artifacts.Upload(repoName,env.fileName,env.fileTargetDir,env.fileDir)
+                }
+            }
+        }
+
+        stage("ReleaseFile"){
+            steps {
+                script {
+          
+                    //下载版本库文件 anyops-devops-service/release.yaml
+                    response = gitlab.GetRepoFile(12,"release.yaml", "master")
+                    
+                    //println(response)
+                    
+                    //替换文件中内容
+                    yamlData = readYaml text: """${response}"""
+
+                    println(yamlData)
+                    yamlData.version   = "${releaseVersion}"
+                    yamlData.artifact  = "http://192.168.1.200:8081/repository/${repoName}/${env.fileTargetDir}/${env.fileName}"
+                    yamlData.buname    = "${buName}"
+                    yamlData.appname   = "${appName}"
+                    println(yamlData.toString())
+
+                    sh "rm -fr test.yaml"
+                    writeYaml charset: 'UTF-8', data: yamlData, file: 'test.yaml'
+                    newYaml = sh returnStdout: true, script: 'cat test.yaml'
+                    
+                    println(newYaml)
+                    //更新gitlab文件内容
+                    base64Content = newYaml.bytes.encodeBase64().toString()
+
+                    // 会有并行问题，同时更新报错
+                    try {
+                        gitlab.UpdateRepoFile(12,"${appName}%2f${branchName}.yaml",base64Content, "master")
+                    } catch(e){
+                        gitlab.CreateRepoFile(12,"${appName}%2f${branchName}.yaml",base64Content, "master")
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script{
+                echo "always......"
+                cleanWs()
+            }
+        }
+
+        success {
+            script {
+                echo "success....."
+            }
+        }
+    }
+
+}

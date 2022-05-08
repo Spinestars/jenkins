@@ -1,0 +1,71 @@
+@Library("devopslib@master") _
+
+def mytools = new org.devops.mytools()
+def gitlab = new org.devops.gitlab()
+
+
+String appName = "${JOB_NAME.split('/')[1].split("_")[0]}"
+String buName  = "${appName.split('-')[0]}"
+String releaseVersion = "${env.releaseVersion}"
+
+
+pipeline {
+    agent { label "k8snode"}
+
+    options {
+        skipDefaultCheckout true
+    }
+
+    stages {
+        stage("GetEnvFile"){
+            steps{
+                script{
+                    //下载版本库文件 anyops-devopsdocker-ui/release-1.1.9.yaml
+                    response = gitlab.GetRepoFile(13,"${appName}%2frelease-${releaseVersion}.yaml", "master")
+                    
+                    sh "rm -fr release-${releaseVersion}.yaml"
+                    writeFile  file: "release-${releaseVersion}.yaml", text: """${response}"""
+                }
+            }
+        }
+
+        stage("Deploy"){
+            steps {
+                script {
+                    sh """
+                        kubectl create ns  ${buName} || echo true
+                        kubectl apply -f ./release-${releaseVersion}.yaml  
+
+                        kubectl rollout history deployment/${appName} -n ${buName} 
+
+                    """    
+                }
+            }
+                
+        }
+
+        stage('RollBack') {
+            input {
+                message "是否回滚上个版本？"
+                ok "Yes"
+                submitter "zeyang,aa"
+                parameters {
+                    string(name: 'actions', defaultValue: 'yes', description: 'actions..[yes/skip]')
+                }
+            }
+            steps {
+
+                script {
+                    echo "Actions is  ${actions}, doing......."
+                    if ( "${actions}" == "yes"){
+                        sh """ kubectl rollout undo deployment/${appName} -n ${buName} """
+                    } else {
+                        println("Skip rollback .....")
+                    }
+                }
+                
+            }
+        }
+    }
+}
+
